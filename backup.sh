@@ -1,6 +1,11 @@
 #!/bin/bash
 # ============================================================
 #  backup_www.sh - Sauvegarde chiffrée de /var/www/html
+#
+#  Usage :
+#    ./backup_www.sh            -> menu interactif
+#    ./backup_www.sh --auto     -> sauvegarde complète, sans prompt
+#                                   (clé conservée), pour cron
 # ============================================================
 
 set -euo pipefail
@@ -12,6 +17,14 @@ ARCHIVE_DIR="${BACKUP_ROOT}/archives"
 KEY_DIR="${BACKUP_ROOT}/keys"
 LOG_DIR="${BACKUP_ROOT}/logs"
 
+# Rétention : nombre de jours d'archives à conserver en mode --auto
+# (indispensable si le script tourne toutes les 5 minutes, sinon
+# le disque se remplit très vite : ~288 archives/jour)
+RETENTION_DAYS=7
+
+AUTO_MODE=0
+[[ "${1:-}" == "--auto" ]] && AUTO_MODE=1
+
 # ---------- Fonctions utilitaires ----------
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "${LOG_FILE}"
@@ -22,7 +35,6 @@ die() {
     exit 1
 }
 
-# Nettoyage automatique en cas d'échec en cours de route
 cleanup_on_error() {
     local ec=$?
     if [[ $ec -ne 0 ]]; then
@@ -42,23 +54,27 @@ command -v tar >/dev/null || die "tar n'est pas installé."
 umask 077
 mkdir -p "$ARCHIVE_DIR" "$KEY_DIR" "$LOG_DIR"
 
-# ---------- Menu interactif ----------
-clear
-echo "============================================================"
-echo "   Sauvegarde chiffrée de : $SOURCE_DIR"
-echo "============================================================"
-echo "1) Sauvegarde complète (archive + chiffrement symétrique AES-256)"
-echo "2) Sauvegarde chiffrée + suppression de la clé après usage"
-echo "3) Quitter"
-echo "============================================================"
-read -rp "Votre choix [1-3] : " CHOICE
+# ---------- Choix du mode ----------
+if [[ "$AUTO_MODE" -eq 1 ]]; then
+    DELETE_KEY_AFTER=0
+else
+    clear
+    echo "============================================================"
+    echo "   Sauvegarde chiffrée de : $SOURCE_DIR"
+    echo "============================================================"
+    echo "1) Sauvegarde complète (archive + chiffrement symétrique AES-256)"
+    echo "2) Sauvegarde chiffrée + suppression de la clé après usage"
+    echo "3) Quitter"
+    echo "============================================================"
+    read -rp "Votre choix [1-3] : " CHOICE
 
-case "$CHOICE" in
-    1) DELETE_KEY_AFTER=0 ;;
-    2) DELETE_KEY_AFTER=1 ;;
-    3) trap - EXIT; echo "Annulé."; exit 0 ;;
-    *) die "Choix invalide." ;;
-esac
+    case "$CHOICE" in
+        1) DELETE_KEY_AFTER=0 ;;
+        2) DELETE_KEY_AFTER=1 ;;
+        3) trap - EXIT; echo "Annulé."; exit 0 ;;
+        *) die "Choix invalide." ;;
+    esac
+fi
 
 # ---------- Horodatage commun (clé + archive) ----------
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
@@ -72,8 +88,6 @@ log "=== Début de la sauvegarde : $BASENAME ==="
 
 # ---------- Génération de la clé symétrique (256 bits) ----------
 log "Génération de la clé AES-256..."
-# tr supprime le retour à la ligne pour éviter toute ambiguïté
-# entre openssl enc et openssl dec sur le contenu exact du fichier clé.
 openssl rand -base64 32 | tr -d '\n' > "$KEY_FILE"
 chmod 600 "$KEY_FILE"
 log "Clé générée : $KEY_FILE"
@@ -96,7 +110,7 @@ log "Archive chiffrée : $ARCHIVE_ENC ($(du -h "$ARCHIVE_ENC" | cut -f1))"
 rm -f "$ARCHIVE_PLAIN"
 log "Archive non chiffrée supprimée."
 
-# ---------- Option : suppression de la clé ----------
+# ---------- Option : suppression de la clé (menu interactif uniquement) ----------
 if [[ "$DELETE_KEY_AFTER" -eq 1 ]]; then
     log "ATTENTION : la clé va être supprimée. Notez-la avant de continuer !"
     echo
@@ -112,6 +126,14 @@ if [[ "$DELETE_KEY_AFTER" -eq 1 ]]; then
     else
         log "Conservation de la clé : $KEY_FILE"
     fi
+fi
+
+# ---------- Rétention : purge des archives/clés/logs trop anciens ----------
+if [[ "$AUTO_MODE" -eq 1 ]]; then
+    log "Purge des archives de plus de ${RETENTION_DAYS} jours..."
+    find "$ARCHIVE_DIR" -name '*.tar.gz.enc' -mtime "+${RETENTION_DAYS}" -delete
+    find "$KEY_DIR" -name '*.key' -mtime "+${RETENTION_DAYS}" -delete
+    find "$LOG_DIR" -name '*.log' -mtime "+${RETENTION_DAYS}" -delete
 fi
 
 log "=== Sauvegarde terminée avec succès ==="
